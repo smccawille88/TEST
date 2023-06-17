@@ -9,6 +9,7 @@ data null;
     call symputx('api_key', api_key);
 run;
 
+/* Define the dataset of prompts with possible values for the 'Task' parameter */
 data Prompts;
     length code $ 16 description $ 1024;
     do code="optimize","clean","efficient","fast","readable"; 
@@ -16,15 +17,19 @@ data Prompts;
         output;
     end;
     code="explain"; 
-    description="I want you to act as a code explainer in SAS. I don't understand this function. Can you please explain what it does, and provide an example? {Insert Code}";
+    description="I want you to act as a code explainer in SAS. I don't understand this function. Can you please explain what it does, and provide sample code? {Insert Code}";
+    output;
+    code="debug"; 
+    description="I want you act as a code debugger in SAS, here is a piece of SAS code {Insert Code} — I am getting the following error {Insert Error}. What is the reason for the bug?";
     output;
 run;
 
-%macro chatgpt(api_key=, print=true, out=, parameter=, insert_code=, describe_code=) / minoperator mindelimiter=' ';
+%macro chatgpt(api_key=,dataset=, print=true, out=, task=, insert_code=, describe_code=, insert_error=) / minoperator mindelimiter=' ';
     /* Use superq to avoid macro quoting issues */
-    %let parameter = %superq(parameter);
-    %let insert_code = %superq(insert_code);
+    %let task = %superq(task);
+    %let insert_code = %superq(insert_code);    
     %let describe_code = %superq(describe_code);
+    %let insert_error = %superq(insert_error);
     %let out = %upcase(&out.);
     %let print = %upcase(&print.);
 
@@ -43,15 +48,15 @@ run;
     %end;
 
     /* Check that the Prompts dataset exists */
-    %if NOT %sysfunc(exist(work.Prompts)) %then %do;
-        %put ERROR: Dataset work.Prompts does not exist!;
+    %if NOT %sysfunc(exist(&dataset.)) %then %do;
+        %put ERROR: Dataset &dataset. does not exist!;
         %goto EndOfMacro;
     %end;
 
-    /* If the parameter is missing, show help information */
-    %if %superq(PARAMETER) = %then %do;
+    /* If the task parameter is missing, show help information */
+    %if %superq(TASK) = %then %do;
         %put NOTE: This is a help info for macro &sysmacroname..;
-        %put NOTE- The PARAMETER parameter allows only the following values for actions:;
+        %put NOTE- The TASK parameter allows only the following values for actions:;
         options nosource;
         data _null_;
             set Prompts;
@@ -66,15 +71,15 @@ run;
         %goto EndOfMacro;
     %end;
 
-    /* Check that the specified parameter is valid */
+    /* Check that the specified task is valid */
     options nosource nonotes;
     proc sql noprint;
-        select code into :list_of_codes separated by " " from work.Prompts;
+        select code into :list_of_codes separated by " " from &dataset.;
     quit;
     options source notes;
 
-    %if NOT (%superq(PARAMETER) in (&list_of_codes.)) %then %do;
-        %put ERROR: The PARAMETER parameter has an invalid value!;
+    %if NOT (%superq(TASK) in (&list_of_codes.)) %then %do;
+        %put ERROR: The TASK parameter has an invalid value!;
         %goto EndOfMacro;
     %end;
 
@@ -82,12 +87,14 @@ run;
     options nosource;
     data _null_;
         set Prompts;
-        where code = symget('parameter');
+        where code = symget('task');
         insert_code = symget('insert_code');
+        insert_error = symget('insert_error');
         describe_code = symget('describe_code');
         length Prompt $ 32767;
         Prompt = prxchange('s/\{Describe problem with current code, if possible\.\}/'||strip(describe_code)||'/io', -1, description);
         Prompt = prxchange('s/\{Insert Code\}/'||strip(insert_code)||'/io', -1, Prompt);
+        Prompt = prxchange('s/\{Insert Error\}/'||strip(insert_error)||'/io', -1, Prompt);
         Prompt = prxchange('s/\{optimize\/clean\/efficient\/fast\/readable\}/'||strip(code)||'/io', -1, Prompt);
         put "THE PROMPT:";
         put Prompt /;
@@ -102,14 +109,13 @@ run;
     /* Body of the POST request */
     filename in temp;
 
-   filename in temp;
-options nosource;
-data _null_;
+  options nosource;
+    data _null_;
     file in;
     put "{";
-    put  '"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": "'"&parameter."'}, {"role": "user", "content": "'"&insert_code."'}, {"role": "user", "content": "'"&describe_code."'}]";
-    put "}";	 
-run;
+    put '"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": ' """&task.""" '}, {"role": "user", "content": ' """&insert_code.""" '},{"role": "user", "content": ' """&insert_error.""" '}, {"role": "user", "content": ' """&describe_code.""" '}]';
+    put "}";
+    run;
 
 
     /* Reference that file as IN= parm in PROC HTTP POST */
@@ -169,6 +175,6 @@ run;
 %EndOfMacro:
 %mend;
 
-%chatgpt(api_key=&api_key.,print=true, out=, parameter= explain, insert_code={proc fcmp}, describe_code=);
-
-
+%chatgpt(api_key=&api_key.,dataset= work.prompts, print=true, out=, task= explain, insert_code={PROC DS2});
+%chatgpt(api_key=&api_key.,dataset= work.prompts, print=true, out=, task= debug, insert_code={data test123; set sashelp.class run;}, insert_error=ERROR: File WORK.RUN.DATA does not exist.);
+%chatgpt(api_key=&api_key.,dataset= work.prompts, print=true, out=, task= efficient, insert_code={data test123; set sashelp.class; run;}, describe_code= That data step works slow.);
